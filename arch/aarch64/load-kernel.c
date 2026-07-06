@@ -8,8 +8,33 @@
 #include <main/boot.h>
 #include <string.h>
 
+/*
+ * Camellia debug: raw write-then-readback self-test, independent of the
+ * pstore_log_console mechanism entirely -- answers "does a write to this
+ * physical address even take effect at all" (address/mapping problem)
+ * vs. "it takes effect locally but the content doesn't survive whatever
+ * reset follows" (both the two prior theories -- D-cache and reset type
+ * -- fall under this second case). Deliberately at PSTORE_LOG_BASE+0x39000,
+ * far past where the actual tiny log volume could ever reach, so it can't
+ * collide with real log text. Result is printed on-screen via the normal
+ * printk() sinks, visible immediately, before anything else runs.
+ */
+#define SELFTEST_ADDR   0x481c9000UL /* PSTORE_LOG_BASE (0x48120000) + 0x39000 */
+
+static void camellia_memtest(void)
+{
+	volatile unsigned int *p = (volatile unsigned int *)SELFTEST_ADDR;
+	unsigned int magic = 0xDEADBEEF;
+
+	*p = magic;
+	__asm__ volatile("dsb sy" ::: "memory");
+	printk(KERN_INFO, "camellia_dbg: memtest addr=%p wrote=0x%x read=0x%x %s\n",
+		(void *)p, magic, *p, (*p == magic) ? "PASS" : "FAIL");
+}
+
 void arch_load_kernel(void* kernel, void* dt, void* ramdisk)
 {
+	camellia_memtest();
 	printk(KERN_INFO, "camellia_dbg: kernel copy: src=%p dst=%p size=%lu\n",
 		kernel, (void*)CONFIG_PAYLOAD_ENTRY, (unsigned long) &kernel_size);
 	memcpy((void*)CONFIG_PAYLOAD_ENTRY, kernel, (unsigned long) &kernel_size);
