@@ -92,6 +92,28 @@ void earlycon_register(void) {}
 #define PSTORE_LOG_HDR_SIZE 12
 #define PSTORE_LOG_MAX   (0x40000 - PSTORE_LOG_HDR_SIZE)
 #define PSTORE_LOG_SIG   0x43474244U /* "DBGC", PERSISTENT_RAM_SIG */
+#define DCACHE_LINE_SIZE 64UL /* safe assumed size; cleaning extra bytes is harmless */
+
+/*
+ * uniLoader never touches SCTLR_EL1 (no MMU/cache-enable code anywhere in
+ * this codebase) -- but whatever ran before it (LK/ATF) may leave the MMU
+ * and D-cache already enabled, and simply never disables them before
+ * jumping here. If so, plain stores to PSTORE_LOG_BASE can sit dirty in
+ * cache and never reach physical DRAM before the watchdog reset that
+ * follows a hang wipes it -- explaining logged output surviving on-screen
+ * (a path that may not go through cacheable memory the same way) while
+ * console-ramoops pulls afterward only ever show ancient stale data.
+ * Clean-by-VA-to-PoC after every write; a no-op if caches are in fact off.
+ */
+static void dcache_clean_range(volatile void *start, unsigned long size)
+{
+	unsigned long addr = (unsigned long)start & ~(DCACHE_LINE_SIZE - 1);
+	unsigned long end = (unsigned long)start + size;
+
+	for (; addr < end; addr += DCACHE_LINE_SIZE)
+		__asm__ volatile("dc cvac, %0" :: "r" (addr) : "memory");
+	__asm__ volatile("dsb sy" ::: "memory");
+}
 
 static void pstore_log_write(int level, const char *prefix, const char *msg)
 {
@@ -101,22 +123,28 @@ static void pstore_log_write(int level, const char *prefix, const char *msg)
 	volatile unsigned int *start = (volatile unsigned int *)(PSTORE_LOG_BASE + 4);
 	volatile unsigned int *size = (volatile unsigned int *)(PSTORE_LOG_BASE + 8);
 	volatile char *data = (volatile char *)(PSTORE_LOG_BASE + PSTORE_LOG_HDR_SIZE);
-	unsigned int off;
+	unsigned int off, start_off;
 	const char *s;
 
 	if (!initialized) {
 		*sig = PSTORE_LOG_SIG;
 		*start = 0;
 		*size = 0;
+		dcache_clean_range((volatile void *)PSTORE_LOG_BASE, PSTORE_LOG_HDR_SIZE);
 		initialized = 1;
 	}
 
 	off = *size;
+	start_off = off;
 	for (s = prefix; *s && off < PSTORE_LOG_MAX; s++, off++)
 		data[off] = *s;
 	for (s = msg; *s && off < PSTORE_LOG_MAX; s++, off++)
 		data[off] = *s;
 	*size = off;
+
+	dcache_clean_range((volatile void *)(PSTORE_LOG_BASE + PSTORE_LOG_HDR_SIZE + start_off),
+			    off - start_off);
+	dcache_clean_range((volatile void *)(PSTORE_LOG_BASE + 8), sizeof(unsigned int)); /* size field */
 }
 
 static const struct console pstore_log_console = {
